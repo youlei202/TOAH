@@ -7,6 +7,7 @@ import torch
 from ..config import EnvConfig
 from ..metrics import sensing_loss, sinr_and_rate
 from .channel import ChannelModel
+from .intersection_mobility import IntersectionMobilityModel
 from .mobility import MobilityModel, Positions
 
 
@@ -28,12 +29,23 @@ class ISACEnv:
         self.device = device
         self.dtype = dtype
 
-        self.mob = MobilityModel(
-            area_size_m=cfg.area_size_m,
-            uav_altitude_m=cfg.uav_altitude_m,
-            n_users=cfg.n_users,
-            device=device,
-        )
+        if cfg.scenario == "uav":
+            self.mob = MobilityModel(
+                area_size_m=cfg.area_size_m,
+                uav_altitude_m=cfg.uav_altitude_m,
+                n_users=cfg.n_users,
+                device=device,
+            )
+        elif cfg.scenario == "rsu_intersection":
+            self.mob = IntersectionMobilityModel(
+                area_size_m=cfg.area_size_m,
+                rsu_height_m=cfg.uav_altitude_m,
+                n_users=cfg.n_users,
+                device=device,
+            )
+        else:
+            raise ValueError(f"Unknown scenario: {cfg.scenario}")
+
         self.chan = ChannelModel(
             n_tx_ant=cfg.n_tx_ant,
             n_user_ant=cfg.n_user_ant,

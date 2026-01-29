@@ -7,12 +7,17 @@ from dataclasses import dataclass
 class EnvConfig:
     """Simulation environment configuration."""
 
+    # Scenario selector
+    # - "uav": a UAV flies a circle and serves (quasi-)static users
+    # - "rsu_intersection": an RSU serves moving vehicles near an intersection
+    scenario: str = "uav"
+
     # Topology
     n_users: int = 4
     n_user_ant: int = 2
     n_tx_ant: int = 16
     area_size_m: float = 250.0
-    uav_altitude_m: float = 80.0
+    uav_altitude_m: float = 80.0  # UAV altitude ("uav") or RSU height ("rsu_intersection")
 
     # Time
     n_slots: int = 1000

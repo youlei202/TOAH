@@ -199,9 +199,16 @@ class AOHeuristic(ISACCore):
     This is intentionally slower than single-loop methods.
     """
 
-    def __init__(self, env_cfg: EnvConfig, algo_cfg: AlgoConfig, device: torch.device, dtype: torch.dtype) -> None:
+    def __init__(
+        self,
+        env_cfg: EnvConfig,
+        algo_cfg: AlgoConfig,
+        device: torch.device,
+        dtype: torch.dtype,
+        outer_rounds: int = 5,
+    ) -> None:
         super().__init__(env_cfg, algo_cfg, device, dtype)
-        self.outer_rounds = 5
+        self.outer_rounds = max(1, int(outer_rounds))
 
     @property
     def name(self) -> str:
