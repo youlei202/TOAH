@@ -39,7 +39,7 @@ class TOAH(ISACCore):
         self.track_sensing_beam(
             state,
             steps=self.algo_cfg.lower_steps_per_slot,
-            scale=float((1.0 - alpha.detach()).clamp(0.0, 1.0).item()),
+            scale=(1.0 - alpha.detach()).clamp(0.0, 1.0),
         )
 
         # 2) hypergradients for leader updates
@@ -87,4 +87,5 @@ class TOAH(ISACCore):
         with torch.no_grad():
             self._alpha_prev.copy_(alpha2.detach())
 
-        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": float(alpha2.detach().cpu())}
+        # Keep alpha as an on-device tensor to avoid per-slot synchronization.
+        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": alpha2.detach()}

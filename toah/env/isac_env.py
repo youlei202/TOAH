@@ -115,12 +115,14 @@ class ISACEnv:
         sense_u = sensing_loss(cur.steering, ws, noise_var=cur.noise_sense)
         info = {
             "t": int(cur.t),
-            "sinr": sinr.detach().cpu(),
-            "rate": rate.detach().cpu(),
-            "served": served.detach().cpu(),
-            "queues": self._queues.detach().cpu(),
-            "arrivals": cur.arrivals.detach().cpu(),
-            "sense_u": float(sense_u.detach().cpu()),
+            # Keep tensors on-device to avoid per-slot CPU\u2194GPU synchronization.
+            # Experiments convert to CPU only once per run when writing tables.
+            "sinr": sinr.detach(),
+            "rate": rate.detach(),
+            "served": served.detach(),
+            "queues": self._queues.detach(),
+            "arrivals": cur.arrivals.detach(),
+            "sense_u": sense_u.detach(),
             "noise_sense": float(cur.noise_sense),
         }
 

@@ -16,6 +16,7 @@ class FixedSensingLeader(ISACCore):
     def __init__(self, env_cfg: EnvConfig, algo_cfg: AlgoConfig, device: torch.device, dtype: torch.dtype) -> None:
         super().__init__(env_cfg, algo_cfg, device, dtype)
         self.hg = HyperGradient(NeumannConfig(steps=algo_cfg.neumann_steps, eta=algo_cfg.neumann_eta))
+        self._alpha = torch.tensor(1.0, device=device, dtype=torch.float32)
 
     @property
     def name(self) -> str:
@@ -40,7 +41,7 @@ class FixedSensingLeader(ISACCore):
         self.opt_u_sense.step(hg[1])
 
         ws2 = self.ws()
-        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": 1.0}
+        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": self._alpha}
 
 
 class FixedCommLeader(ISACCore):
@@ -49,6 +50,7 @@ class FixedCommLeader(ISACCore):
     def __init__(self, env_cfg: EnvConfig, algo_cfg: AlgoConfig, device: torch.device, dtype: torch.dtype) -> None:
         super().__init__(env_cfg, algo_cfg, device, dtype)
         self.hg = HyperGradient(NeumannConfig(steps=algo_cfg.neumann_steps, eta=algo_cfg.neumann_eta))
+        self._alpha = torch.tensor(0.0, device=device, dtype=torch.float32)
 
     @property
     def name(self) -> str:
@@ -73,7 +75,7 @@ class FixedCommLeader(ISACCore):
         self.opt_u_comm.step(hg[0])
 
         ws2 = self.ws()
-        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": 0.0}
+        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": self._alpha}
 
 
 class HeuristicGate(ISACCore):
@@ -92,6 +94,7 @@ class HeuristicGate(ISACCore):
 
     def step(self, state: EnvState) -> dict:
         alpha = self._alpha(state)
+        alpha_t = torch.tensor(float(alpha), device=self.device, dtype=torch.float32)
 
         self.track_comm_receivers(state, steps=self.algo_cfg.lower_steps_per_slot)
         if alpha < 0.5:
@@ -123,7 +126,7 @@ class HeuristicGate(ISACCore):
             self.opt_u_comm.step(hg[0])
 
         ws2 = self.ws()
-        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": float(alpha)}
+        return {"ws": ws2.detach(), "vs": self.vs().detach(), "alpha": alpha_t}
 
 
 class TOAHNoHG(ISACCore):
@@ -155,7 +158,7 @@ class TOAHNoHG(ISACCore):
         self.track_sensing_beam(
             state,
             steps=self.algo_cfg.lower_steps_per_slot,
-            scale=float((1.0 - alpha.detach()).clamp(0.0, 1.0).item()),
+            scale=(1.0 - alpha.detach()).clamp(0.0, 1.0),
         )
 
         # Leader gradients: detach follower variables
@@ -189,7 +192,7 @@ class TOAHNoHG(ISACCore):
         with torch.no_grad():
             self._alpha_prev.copy_(alpha2.detach())
 
-        return {"ws": self.ws().detach(), "vs": self.vs().detach(), "alpha": float(alpha2.detach().cpu())}
+        return {"ws": self.ws().detach(), "vs": self.vs().detach(), "alpha": alpha2.detach()}
 
 
 class AOHeuristic(ISACCore):
@@ -219,6 +222,7 @@ class AOHeuristic(ISACCore):
 
     def step(self, state: EnvState) -> dict:
         alpha = self._alpha(state)
+        alpha_t = torch.tensor(float(alpha), device=self.device, dtype=torch.float32)
 
         for _ in range(self.outer_rounds):
             # Inner loop: followers to (approximate) convergence
@@ -239,4 +243,4 @@ class AOHeuristic(ISACCore):
                 grad = torch.autograd.grad(f, [self.beamformer.u_comm], retain_graph=False)
                 self.opt_u_comm.step(grad[0])
 
-        return {"ws": self.ws().detach(), "vs": self.vs().detach(), "alpha": float(alpha)}
+        return {"ws": self.ws().detach(), "vs": self.vs().detach(), "alpha": alpha_t}

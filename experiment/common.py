@@ -121,60 +121,94 @@ def run_episode(
     algo = AlgoCls(env_cfg, algo_cfg, device=device, dtype=dtype, **method_kwargs)
     algo.reset(state)
 
-    alpha_prev: Optional[float] = None
-    alpha_tv = 0.0
-    switch_count = 0
-    deadline_viol = 0
+    # IMPORTANT: Keep per-slot metrics on-device during the run.
+    # Converting tensors to CPU (or calling .item()) inside the slot loop
+    # forces CPU↔GPU synchronization and can slow down experiments by orders
+    # of magnitude. We only convert to CPU once per run at the end.
 
-    rows: List[Dict[str, Any]] = []
+    alpha_prev: Optional[torch.Tensor] = None
+    alpha_tv = torch.zeros((), device=device, dtype=torch.float32)
+    switch_count = torch.zeros((), device=device, dtype=torch.int32)
+    deadline_viol = torch.zeros((), device=device, dtype=torch.int32)
+
+    ts_t: List[int] = []
+    ts_alpha: List[torch.Tensor] = []
+    ts_sumq: List[torch.Tensor] = []
+    ts_maxq: List[torch.Tensor] = []
+    ts_sense: List[torch.Tensor] = []
+    ts_sumrate: List[torch.Tensor] = []
+    ts_noise: List[float] = []
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     t_start = time.perf_counter()
 
-    done = False
-    while not done:
-        t0 = time.perf_counter()
-
+    for _ in range(int(env_cfg.n_slots)):
         state_in = apply_csi_error(state, std=csi_error_std, base_seed=seed + 777)
         act = algo.step(state_in)
-
         state, info, done = env.step(act["ws"], act["vs"])
-        t1 = time.perf_counter()
 
-        alpha = float(act["alpha"])
+        alpha = act["alpha"]
+        if not isinstance(alpha, torch.Tensor):
+            alpha = torch.tensor(float(alpha), device=device, dtype=torch.float32)
+        else:
+            alpha = alpha.to(device=device, dtype=torch.float32)
+
         if alpha_prev is not None:
-            alpha_tv += abs(alpha - alpha_prev)
-            if (alpha_prev <= 0.5 < alpha) or (alpha <= 0.5 < alpha_prev):
-                switch_count += 1
+            alpha_tv = alpha_tv + torch.abs(alpha - alpha_prev)
+            prev_side = (alpha_prev > 0.5)
+            side = (alpha > 0.5)
+            switch_count = switch_count + (prev_side != side).to(torch.int32)
         alpha_prev = alpha
 
-        queues = torch.as_tensor(info["queues"])
-        sum_q = float(torch.sum(queues).item())
-        max_q = float(torch.max(queues).item())
-        if max_q > q_deadline:
-            deadline_viol += 1
+        queues = info["queues"].to(dtype=torch.float32)
+        sum_q = torch.sum(queues)
+        max_q = torch.max(queues)
+        deadline_viol = deadline_viol + (max_q > q_deadline).to(torch.int32)
 
-        sum_rate = float(torch.sum(torch.as_tensor(info["rate"])).item())
+        rate = info["rate"].to(dtype=torch.float32)
+        sum_rate = torch.sum(rate)
+        sense_u = info["sense_u"].to(dtype=torch.float32)
 
-        rows.append(
-            {
-                "t": int(info["t"]),
-                "alpha": alpha,
-                "sum_queue": sum_q,
-                "max_queue": max_q,
-                "sense_u": float(info["sense_u"]),
-                "sum_rate": sum_rate,
-                "noise_sense": float(info["noise_sense"]),
-                "slot_ms": 1000.0 * (t1 - t0),
-            }
-        )
+        ts_t.append(int(info["t"]))
+        ts_alpha.append(alpha.detach())
+        ts_sumq.append(sum_q.detach())
+        ts_maxq.append(max_q.detach())
+        ts_sense.append(sense_u.detach())
+        ts_sumrate.append(sum_rate.detach())
+        ts_noise.append(float(info["noise_sense"]))
 
+        if done:
+            break
+
+    if device.type == "cuda":
+        torch.cuda.synchronize()
     total_time_s = float(time.perf_counter() - t_start)
 
-    df_ts = pd.DataFrame(rows)
-    avg_sumq = float(df_ts["sum_queue"].mean())
-    p95_maxq = float(np.percentile(df_ts["max_queue"], 95))
-    avg_sense = float(df_ts["sense_u"].mean())
-    p95_sense = float(np.percentile(df_ts["sense_u"], 95))
-    avg_slot_ms = float(df_ts["slot_ms"].mean())
+    alpha_np = torch.stack(ts_alpha).cpu().numpy()
+    sumq_np = torch.stack(ts_sumq).cpu().numpy()
+    maxq_np = torch.stack(ts_maxq).cpu().numpy()
+    sense_np = torch.stack(ts_sense).cpu().numpy()
+    sumrate_np = torch.stack(ts_sumrate).cpu().numpy()
+
+    df_ts = pd.DataFrame(
+        {
+            "t": np.asarray(ts_t, dtype=np.int64),
+            "alpha": alpha_np,
+            "sum_queue": sumq_np,
+            "max_queue": maxq_np,
+            "sense_u": sense_np,
+            "sum_rate": sumrate_np,
+            "noise_sense": np.asarray(ts_noise, dtype=np.float64),
+        }
+    )
+
+    avg_sumq = float(np.mean(sumq_np))
+    p95_maxq = float(np.nanpercentile(maxq_np, 95))
+    avg_sense = float(np.mean(sense_np))
+    p95_sense = float(np.nanpercentile(sense_np, 95))
+    n_slots_eff = max(1, len(ts_t))
+    avg_slot_ms = 1000.0 * total_time_s / float(n_slots_eff)
 
     summary = {
         "seed": int(seed),
@@ -183,9 +217,9 @@ def run_episode(
         "p95_max_queue": p95_maxq,
         "avg_sense_u": avg_sense,
         "p95_sense_u": p95_sense,
-        "alpha_total_variation": float(alpha_tv),
-        "switch_count": int(switch_count),
-        "deadline_violation_rate": float(deadline_viol) / float(max(1, len(df_ts))),
+        "alpha_total_variation": float(alpha_tv.detach().cpu().item()),
+        "switch_count": int(switch_count.detach().cpu().item()),
+        "deadline_violation_rate": float(deadline_viol.detach().cpu().item()) / float(max(1, len(df_ts))),
         "avg_slot_ms": avg_slot_ms,
         "total_time_s": total_time_s,
         "device": str(device),

@@ -90,11 +90,40 @@ class ISACCore(OnlineAlgorithm):
             grad_v = torch.autograd.grad(g, self.receivers.v, retain_graph=False, create_graph=False)[0]
             self.opt_v.step(grad_v)
 
-    def track_sensing_beam(self, state: EnvState, steps: int, scale: float = 1.0) -> None:
-        if scale <= 0.0:
+    def track_sensing_beam(self, state: EnvState, steps: int, scale: float | torch.Tensor = 1.0) -> None:
+        """Track the sensing beam (follower) with optional scaling.
+
+        We allow ``scale`` to be a scalar tensor to avoid forcing CPU↔GPU
+        synchronization (e.g., via ``.item()``) in online loops. When
+        ``scale == 0``, we skip both the parameter update and the momentum
+        update so that the follower truly freezes, matching the intended
+        "comm-led" behavior.
+        """
+
+        steps_i = int(steps)
+        if steps_i <= 0:
             return
-        for _ in range(int(steps)):
+
+        # A scalar tensor on the same device, clamped for numerical safety.
+        scale_t = torch.as_tensor(scale, device=self.beamformer.u_sense.device, dtype=torch.float32).clamp(0.0, 1.0)
+        do_update = (scale_t > 0.0).to(dtype=torch.float32)  # scalar {0,1}
+
+        for _ in range(steps_i):
             ws = self.ws()
             g = self.lower_sense(state, ws)
             grad_us = torch.autograd.grad(g, self.beamformer.u_sense, retain_graph=False, create_graph=False)[0]
-            self.opt_u_sense.step(scale * grad_us)
+            grad_scaled = grad_us * scale_t
+
+            # Momentum update with a tensor mask, so we can "skip" updates
+            # without a Python-side branch that would synchronize the GPU.
+            with torch.no_grad():
+                buf = self.opt_u_sense.state.buf
+                buf_candidate = self.opt_u_sense.momentum * buf + grad_scaled
+                buf_new = do_update * buf_candidate + (1.0 - do_update) * buf
+
+                param = self.beamformer.u_sense.data
+                param_candidate = param - self.opt_u_sense.lr * buf_candidate
+                param_new = do_update * param_candidate + (1.0 - do_update) * param
+
+                buf.copy_(buf_new)
+                param.copy_(param_new)
